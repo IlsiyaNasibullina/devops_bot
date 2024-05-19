@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  bot:
+    image: 172.20.10.5:5000/bot_image
+    container_name: bot
+    environment:
+      - RM_HOST=${RM_HOST}
+      - RM_PORT=${RM_PORT}
+      - RM_USER=${RM_USER}
+      - RM_PASSWORD=${RM_PASSWORD}
+      - DB_DATABASE=${DB_DATABASE}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - TOKEN=${TOKEN}
+    depends_on:
+      - db
+    volumes:
+      - shared_logs:/var/log/postgresql
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+
+  db:
+    image: 172.20.10.5:5000/db_image
+    container_name: postgres_db
+    environment:
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - REPLICATION_USER=${DB_REPL_USER}
+      - REPLICATION_PASSWORD=${DB_REPL_PASSWORD}
+    command: |
+      postgres
+      -c archive_mode=on
+      -c archive_command='cp %p /oracle/pg_data/archive/%f'
+      -c max_wal_senders=10
+      -c wal_level=replica
+      -c wal_log_hints=on
+      -c log_replication_commands=on
+      -c logging_collector=on
+      -c log_directory='/var/log/postgresql'
+      -c log_filename='postgresql.log'
+      -c log_statement='all'
+    volumes:
+      - shared_logs:/var/log/postgresql/
+    ports:
+      - "5432:5432"
+    env_file:
+      - .env
+
+  dp_repl:
+    image: 172.20.10.5:5000/db_repl_image
+    container_name: postgres_repl
+    environment:
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - REPLICATION_USER=${DB_REPL_USER}
+      - REPLICATION_PASSWORD=${DB_REPL_PASSWORD}
+    depends_on:
+      - db
+    command: |
+      bash -c "
+      echo 'host replication repl_user 0.0.0.0/0 md5' >> /var/lib/postgresql/data/pg_hba.conf
+      echo 'host all all 0.0.0.0/0 password' >> /var/lib/postgresql/data/pg_hba.conf
+      rm -rf /var/lib/postgresql/data*
+      export PGPASSWORD="1234" && until pg_basebackup --pgdata=/var/lib/postgresql/data -R --slot=replication_slot --host=db -U repl_user
+      do
+      echo 'Waiting for primary to connect...'
+      sleep 15s
+      done
+      echo 'Backup done, starting replica...'
+      chmod 0700 /var/lib/postgresql/data
+      chown -R postgres:postgres /var/lib/postgresql/data
+      exec gosu postgres postgres #-c config_file=/etc/postgresql/postgresql.conf
+      "
+    ports:
+      - "5433:5432"
+    env_file:
+      - .env
+
+volumes:
+  shared_logs:
+
+networks:
+  mynet:
+    driver: bridge
