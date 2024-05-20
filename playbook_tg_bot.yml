@@ -1,0 +1,238 @@
+---
+- name: db
+  hosts: db
+  become: yes
+  vars_files:
+    - ./secrets.yaml
+  tasks:
+    - name: Install necessary packages
+      apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+      loop:
+        - postgresql
+        - postgresql-contrib
+        - sudo
+    - name: Create db directory
+      file:
+        path: /oracle/pg_data/archive
+        state: directory
+        mode: '0755'
+        owner: postgres
+        group: postgres
+    - name: Initialize PostgreSQL
+      ansible.builtin.command:
+        cmd: "pg_createcluster 14 main"
+      become: yes
+
+    - name: Setup pg_hba.conf
+      ansible.builtin.blockinfile:
+        create: true
+        path: "/etc/postgresql/14/main/pg_hba.conf"
+        block: |
+          local all {{DB_USER}} peer
+          host all all 0.0.0.0/0 password
+          host replication {{DB_REPL_USER}} {{DB_REPL_HOST}}/24 trust
+      become: yes
+      become_user: root
+    - name: Setup postgresql.conf
+      ansible.builtin.blockinfile:
+        create: true
+        path: "/etc/postgresql/14/main/postgresql.conf"
+        block: |
+          listen_addresses = '*'
+          port = {{DB_PORT}}
+          logging_collector = on
+          log_directory = '/var/log/postgresql/'
+          log_filename = 'postgresql.log'
+          log_statement = 'all'
+          archive_mode = on
+          archive_command = 'cp %p /oracle/pg_data/archive/%f'
+          max_wal_senders = 10
+          wal_level = replica
+          wal_log_hints = on
+          log_replication_commands = on
+      become: yes
+    - name: Restart PostgreSQL
+      ansible.builtin.service:
+          name: postgresql@14-main
+          state: restarted
+      become: yes
+
+    - name: Create bot database
+      postgresql_db:
+          state: present
+          name: "{{ DB_DATABASE }}"
+      become: yes
+      become_user: postgres
+    - name: Create Emails table
+      postgresql_table:
+          db: "{{ DB_DATABASE }}"
+          table: emails
+          columns:
+          - id SERIAL PRIMARY KEY
+          - Email VARCHAR(255)
+      become: yes
+      become_user: postgres
+    - name: Create Phones database
+      postgresql_table:
+          db: "{{ DB_DATABASE }}"
+          table: phones
+          columns:
+          - id SERIAL PRIMARY KEY
+          - Phone VARCHAR(255)
+      become: yes
+      become_user: postgres
+    - name: Set password to postgres
+      postgresql_user:
+          name: "{{ DB_USER }}"
+          password: "{{ DB_PASSWORD }}"
+      become: yes
+      become_user: postgres
+
+    - name: Create repl_user
+      postgresql_user:
+          state: present
+          name: "{{ DB_REPL_USER }}"
+          password: "{{ DB_REPL_PASSWORD }}"
+          role_attr_flags: REPLICATION,LOGIN
+      become: yes
+      become_user: postgres
+      environment:
+        POSTGRES_USER: "{{ DB_USER }}"
+        POSTGRES_PASSWORD: "{{ DB_PASSWORD }}"
+        DB_REPL_USER: "{{ DB_REPL_USER }}"
+        DB_REPL_PASSWORD: "{{ DB_REPL_PASSWORD }}"
+        DB_REPL_HOST: "{{ DB_REPL_HOST }}"
+        DB_PORT: "{{ DB_PORT }}"
+        DB_DATABASE: "{{ DB_DATABASE }}"
+
+- name: db_repl
+  hosts: db_repl
+  become: yes
+  vars_files:
+    - ./secrets.yaml
+  tasks:
+    - name: Install necessary packages
+      apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+      loop:
+        - postgresql
+        - postgresql-contrib
+        - sudo
+      become: yes
+    - name: Initialize PostgreSQL
+      ansible.builtin.command:
+        cmd: "pg_createcluster 14 main"
+      become: yes
+    - name: Setup pg_hba.conf
+      ansible.builtin.blockinfile:
+        create: true
+        path: "/etc/postgresql/14/main/pg_hba.conf"
+        block: |
+          local all {{DB_USER}} peer
+          host replication {{DB_REPL_USER}} {{ DB_HOST }}/24 trust
+      become: yes
+      become_user: root
+    - name: Setup postgresql.conf
+      ansible.builtin.blockinfile:
+        create: true
+        path: "/etc/postgresql/14/main/postgresql.conf"
+        block: |
+          listen_addresses = '*, {{ DB_HOST }}'
+          port = {{DB_PORT}}
+      become: yes
+    - name: Stop PostgreSQL
+      ansible.builtin.service:
+          name: postgresql@14-main
+          state: stopped
+      become: yes
+    - name: Remove directry
+      file:
+          path: "/var/lib/postgresql/data"
+          state: absent
+          owner: postgres
+          group: postgres
+      become: yes
+      become_user: root
+    - name: Pg_baseback
+      ansible.builtin.command:
+        cmd: |
+          pg_basebackup --pgdata=/var/lib/postgresql/data -R --host={{ DB_HOST }} -U {{ DB_REPL_USER }} -w
+      become: yes
+      become_user: postgres
+      environment:
+        PGPASSWORD: "{{ DB_REPL_PASSWORD }}"
+    - name: Start PostgreSQL
+      ansible.builtin.service:
+          name: postgresql@14-main
+          state: started
+      become: yes
+      become_user: root
+      environment:
+        POSTGRES_USER: "{{ DB_USER }}"
+        POSTGRES_PASSWORD: "{{ DB_PASSWORD }}"
+        DB_REPL_USER: "{{ DB_REPL_USER }}"
+        DB_REPL_PASSWORD: "{{ DB_REPL_PASSWORD }}"
+        DB_REPL_HOST: "{{ DB_REPL_HOST }}"
+        DB_PORT: "{{ DB_PORT }}"
+        DB_DATABASE: "{{ DB_DATABASE }}"
+
+- name: bot
+  hosts: bot
+  become: yes
+  vars_files:
+    - ./secrets.yaml
+  tasks:
+    - name: Install necessary packages
+      apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+      loop:
+        - python3
+        - python3-pip
+        - sudo
+
+    - name: Ensure pip is upgraded
+      pip:
+        name: pip
+        state: latest
+        executable: pip3
+    - name: Install bot requirements
+      pip:
+        name:
+          - python-telegram-bot==13.7
+          - paramiko==3.4.0
+          - python-dotenv==1.0.1
+          - requests==2.31.0
+          - psycopg2-binary
+          - urllib3==1.26.15
+
+    - name: Create bot directory
+      file:
+        path: ~/devops_bot
+        state: directory
+        mode: '0755'
+
+    - name: Download bot.py
+      ansible.builtin.git:
+        repo: https://github.com/IlsiyaNasibullina/devops_bot.git
+        dest: ~/devops_bot
+
+    - name: Run bot
+      shell: |
+        python3 ~/devops_bot/bot.py
+      environment:
+        TOKEN: "{{ TOKEN }}"
+        DB_HOST: "{{ DB_HOST }}"
+        DB_USER: "{{ DB_USER }}"
+        DB_PASSWORD: "{{ DB_PASSWORD }}"
+        DB_DATABASE: "{{ DB_DATABASE }}"
+        RM_HOST: "{{ RM_HOST }}"
+        RM_PORT: "{{ RM_PORT }}"
+        RM_USER: "{{ RM_USER }}"
+        RM_PASSWORD: "{{ RM_PASSWORD }}"
